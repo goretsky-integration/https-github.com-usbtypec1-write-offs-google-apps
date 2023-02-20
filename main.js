@@ -1,3 +1,88 @@
+class ValidationError extends Error {
+}
+
+class SheetCursor {
+    constructor({columnNumber, rowNumber}) {
+        this.rowNumber = rowNumber
+        this.columnNumber = columnNumber
+    }
+
+    static fromEvent({range}) {
+        return new SheetCursor({columnNumber: range.getColumn(), rowNumber: range.getRow()})
+    }
+
+    get range() {
+        return SpreadsheetApp.getActiveSheet().getRange(this.rowNumber, this.columnNumber)
+    }
+
+    clear() {
+        this.range.clearContent()
+    }
+
+    get right() {
+        return new SheetCursor({columnNumber: this.columnNumber + 1, rowNumber: this.rowNumber})
+    }
+
+    get left() {
+        return new SheetCursor({columnNumber: this.columnNumber - 1, rowNumber: this.rowNumber})
+    }
+
+    get firstOfRow() {
+        return new SheetCursor({columnNumber: 1, rowNumber: this.rowNumber})
+    }
+
+    get value() {
+        return this.range.getValue()
+    }
+
+    get sheetName() {
+        return SpreadsheetApp.getActiveSheet().getName()
+    }
+}
+
+const columnNumberFactory = allowedColumns => event => allowedColumns.includes(event.range.getColumn())
+
+const isTypeOfDate = value => value instanceof Date
+
+const isDateInFuture = value => {
+    return TimeUtilities.now().getTime() < value.getTime()
+}
+
+const validateDate = value => {
+    const UI = SpreadsheetApp.getUi()
+    console.log(value)
+    if (!isTypeOfDate(value)) {
+        throw new ValidationError('Неправильный формат времени (HH:MM, HH:MM:SS)')
+    }
+    if (!isDateInFuture(TimeHelper.normalizeDate(value))) {
+        const userChoice = UI.alert('Вы точно хотите ввести уже прошедшее время списания?', UI.ButtonSet.YES_NO)
+        if (userChoice == UI.Button.NO) {
+            throw new ValidationError()
+        }
+    }
+}
+
+const isCellCleaned = event => typeof event.value === 'undefined'
+
+const handleEdit = (event) => {
+    const UI = SpreadsheetApp.getUi()
+    const isWriteOffAtColumn = columnNumberFactory([2, 4, 6, 8, 10, 12, 14])
+    const cursor = SheetCursor.fromEvent(event)
+    if (!isWriteOffAtColumn(event)) return
+
+    try {
+        if (!isCellCleaned(event)) {
+            validateDate(cursor.value)
+        }
+    } catch (error) {
+        if (error instanceof ValidationError) {
+            cursor.clear()
+            if (error.message) UI.alert(error.message)
+            return
+        }
+    }
+}
+
 function enumerate(iterable, start = 0) {
     return iterable.map((elem) => [start++, elem]);
 }
@@ -34,6 +119,43 @@ class AlreadyExpiredFilter {
             fromSecondsThreshold <= passedSeconds &&
             passedSeconds <= toSecondsThreshold
         );
+    }
+}
+
+
+class DatabaseAPI {
+    constructor(serverUrl) {
+        this.serverUrl = serverUrl
+    }
+
+    getUnits() {
+        const response = UrlFetchApp.fetch(`${this.serverUrl}/units/`)
+        return JSON.parse(response.getContentText())
+    }
+
+    getUnitByName(name) {
+        const response = UrlFetchApp.fetch(`${this.serverUrl}/units/name/${name}/`)
+        return JSON.parse(response.getContentText())
+    }
+}
+
+
+class WriteOffsAPI {
+    constructor(serverUrl, token) {
+        this.serverUrl = serverUrl;
+        this.token = token
+    }
+
+    createEvents(events) {
+        const response = UrlFetchApp.fetch(`${this.serverUrl}/events/`, {
+            method: "POST",
+            contentType: "application/json",
+            headers: {
+                Authorization: `Bearer ${this.token}`,
+            },
+            payload: JSON.stringify(events),
+        });
+        Logger.log(response.getResponseCode())
     }
 }
 
@@ -110,8 +232,7 @@ class WorksheetSelector {
             const [toBeWrittenOffAtt, isChecked] = row
             return {toBeWrittenOffAtt, isChecked}
         })
-        return enumerate(rows, 2).map(enumeratedRow => {
-            const [rowNumber, writeOff] = enumeratedRow
+        return enumerate(rows, 2).map(([rowNumber, writeOff]) => {
             return {...writeOff, row: rowNumber, column: writeOffDatesColumnNumber}
         })
     }
@@ -179,13 +300,38 @@ function paintBySpecification({worksheets, specifications, writeOffs}) {
         const specification = specifications.find(specification => specification.event === event)
         const worksheet = worksheets.find(worksheet => worksheet.getName() === unitName)
         if (typeof specification === 'undefined' || typeof worksheet === 'undefined') return
-        worksheet.getRange({row, column}).setBackground(specification.color)
+        worksheet.getRange(row, column).setBackground(specification.color)
     })
+}
+
+
+function prepareEventsPayload({writeOffs, units}) {
+    const unitNameToEvents = {}
+    writeOffs.forEach(writeOff => {
+        if (!(writeOff.unitName in unitNameToEvents)) {
+            unitNameToEvents[writeOff.unitName] = []
+        }
+        unitNameToEvents[writeOff.unitName].push(writeOff.event)
+    })
+    const payload = []
+    Object.entries(unitNameToEvents).forEach(([unitName, events]) => {
+        const unit = units.find(({name}) => name === unitName)
+        if (typeof unit === 'undefined') return
+        payload.push({unit_id: unit.id, unit_name: unit.name, events: events})
+    })
+    return payload
 }
 
 
 function main() {
     const now = TimeUtilities.now()
+
+    const writeOffsAPI = new WriteOffsAPI('')
+    const databaseAPI = new DatabaseAPI('')
+
+    const units = databaseAPI.getUnits()
+    const allowedSheetNames = units.map(({name}) => name)
+
     const eventFilters = [
         new AlreadyExpiredFilter(600, 30),
         new TimeBeforeExpireFilter("EXPIRE_AT_5_MINUTES", 270, 330),
@@ -200,17 +346,34 @@ function main() {
         new PaintSpecification({event: 'EXPIRE_AT_15_MINUTES', color: '#f4aa52'}),
     ]
 
-    const worksheets = SpreadsheetApp.getActive().getSheets()
+    const worksheets = SpreadsheetApp
+        .getActive()
+        .getSheets()
+        .filter(worksheet => allowedSheetNames.includes(worksheet.getName()))
 
     const writeOffHandlers = worksheets.map(worksheet => {
         return new WorksheetWriteOffsHandler({eventFilters, worksheet})
     })
 
     const worksheetsWriteOffs = findWriteOffsInWorksheets({writeOffHandlers, now})
+    const eventsPayload = prepareEventsPayload({writeOffs: worksheetsWriteOffs, units: units})
 
-    paintBySpecification({
-        worksheets: worksheets,
-        specifications: paintSpecifications,
-        writeOffs: worksheetsWriteOffs},
-    )
+    if (eventsPayload.length === 0) return
+
+    try {
+        writeOffsAPI.createEvents(eventsPayload)
+    } catch (error) {
+        console.log(error.message)
+    }
+
+    try {
+        paintBySpecification({
+            worksheets: worksheets,
+            specifications: paintSpecifications,
+            writeOffs: worksheetsWriteOffs,
+        })
+
+    } catch (error) {
+        console.log(error)
+    }
 }
