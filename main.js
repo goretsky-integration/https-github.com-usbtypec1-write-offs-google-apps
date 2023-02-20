@@ -166,6 +166,24 @@ function findWriteOffsInWorksheets({writeOffHandlers, now}) {
 }
 
 
+class PaintSpecification {
+    constructor({event, color}) {
+        this.event = event
+        this.color = color
+    }
+}
+
+
+function paintBySpecification({worksheets, specifications, writeOffs}) {
+    writeOffs.forEach(({event, unitName, row, column}) => {
+        const specification = specifications.find(specification => specification.event === event)
+        const worksheet = worksheets.find(worksheet => worksheet.getName() === unitName)
+        if (typeof specification === 'undefined' || typeof worksheet === 'undefined') return
+        worksheet.getRange({row, column}).setBackground(specification.color)
+    })
+}
+
+
 function main() {
     const now = TimeUtilities.now()
     const eventFilters = [
@@ -173,6 +191,13 @@ function main() {
         new TimeBeforeExpireFilter("EXPIRE_AT_5_MINUTES", 270, 330),
         new TimeBeforeExpireFilter("EXPIRE_AT_10_MINUTES", 570, 630),
         new TimeBeforeExpireFilter("EXPIRE_AT_15_MINUTES", 870, 930),
+    ]
+
+    const paintSpecifications = [
+        new PaintSpecification({event: 'ALREADY_EXPIRED', color: '#f45252'}),
+        new PaintSpecification({event: 'EXPIRE_AT_5_MINUTES', color: '#f46052'}),
+        new PaintSpecification({event: 'EXPIRE_AT_10_MINUTES', color: '#f47b52'}),
+        new PaintSpecification({event: 'EXPIRE_AT_15_MINUTES', color: '#f4aa52'}),
     ]
 
     const worksheets = SpreadsheetApp.getActive().getSheets()
@@ -183,5 +208,9 @@ function main() {
 
     const worksheetsWriteOffs = findWriteOffsInWorksheets({writeOffHandlers, now})
 
-    console.log(worksheetsWriteOffs)
+    paintBySpecification({
+        worksheets: worksheets,
+        specifications: paintSpecifications,
+        writeOffs: worksheetsWriteOffs},
+    )
 }
