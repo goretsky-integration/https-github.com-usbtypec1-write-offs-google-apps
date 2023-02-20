@@ -1,3 +1,8 @@
+function enumerate(iterable, start = 0) {
+    return iterable.map((elem) => [start++, elem]);
+}
+
+
 class TimeBeforeExpireFilter {
     constructor(eventType, rangeStart, rangeStop) {
         this.eventType = eventType;
@@ -79,15 +84,13 @@ function calculateColumnNumberByWeekday(weekday) {
 
 const columnNumberToChar = [null, 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O']
 
+const isWriteOffDateValid = ({toBeWrittenOffAtt}) => toBeWrittenOffAtt instanceof Date
 
-const isWriteOffDateValid = ({toBeWrittenOffAtt}) => {
-    if (typeof toBeWrittenOffAtt === 'string') return false
-    return toBeWrittenOffAtt instanceof Date;
-}
+const isCheckboxValid = ({isChecked}) => isChecked === false
 
 const filterWriteOffs = writeOffs => {
-    return writeOffs.filter(isWriteOffDateValid).map(({toBeWrittenOffAtt, isChecked}) => {
-        return {isChecked: isChecked, toBeWrittenOffAtt: TimeUtilities.normalizeDate(toBeWrittenOffAtt)}
+    return writeOffs.filter(isWriteOffDateValid).filter(isCheckboxValid).map(writeOff => {
+        return {...writeOff, toBeWrittenOffAtt: TimeUtilities.normalizeDate(writeOff.toBeWrittenOffAtt)}
     })
 }
 
@@ -103,9 +106,13 @@ class WorksheetSelector {
         const checkboxColumnChar = columnNumberToChar[checkboxesColumnNumber]
         const worksheetName = this.worksheet.getName()
         const range = `${worksheetName}!${dateColumnChar}2:${checkboxColumnChar}`
-        return this.worksheet.getRange(range).getValues().map(row => {
+        const rows = this.worksheet.getRange(range).getValues().map(row => {
             const [toBeWrittenOffAtt, isChecked] = row
             return {toBeWrittenOffAtt, isChecked}
+        })
+        return enumerate(rows, 2).map(enumeratedRow => {
+            const [rowNumber, writeOff] = enumeratedRow
+            return {...writeOff, row: rowNumber, column: writeOffDatesColumnNumber}
         })
     }
 }
@@ -121,11 +128,13 @@ class WorksheetWriteOffsHandler {
     findWriteOffs({now}) {
         const weekday = TimeUtilities.getWeekdayFromDate(now)
 
+        const worksheetName = this.worksheet.getName()
+
         const rawWriteOffs = this.worksheetSelector.getWriteOffsByWeekday(weekday)
 
         const filteredWriteOffs = filterWriteOffs(rawWriteOffs)
 
-        const worksheetEvents = new Set()
+        const worksheetWriteOffsWithEvents = []
 
         filteredWriteOffs.forEach(writeOff => {
 
@@ -137,22 +146,23 @@ class WorksheetWriteOffsHandler {
             this.eventFilters.forEach(eventFilter => {
 
                 if (eventFilter.isSatisfied(timeBeforeExpire)) {
-                    worksheetEvents.add(eventFilter.eventType)
+                    worksheetWriteOffsWithEvents.push({
+                        ...writeOff,
+                        event: eventFilter.eventType,
+                        unitName: worksheetName,
+                    })
                 }
 
             })
         })
-
-        return {unitName: this.worksheet.getName(), events: Array.from(worksheetEvents)}
+        return worksheetWriteOffsWithEvents
 
     }
 
 }
 
 function findWriteOffsInWorksheets({writeOffHandlers, now}) {
-    return writeOffHandlers
-        .map(handler => handler.findWriteOffs({now}))
-        .filter(({events}) => events.length !== 0)
+    return writeOffHandlers.map(handler => handler.findWriteOffs({now})).flat()
 }
 
 
